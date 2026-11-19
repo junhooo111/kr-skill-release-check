@@ -13,6 +13,10 @@
 - git 이력: 커밋 작성자 이메일, 이력에 남은 비밀 값
 - 구조: `SKILL.md` 프런트매터, LICENSE, README, 출처 표기
 
+## 요구 사항
+
+Node 18 이상(점검 스크립트 `scripts/scan.mjs`용), git(이력 점검용).
+
 ## 설치
 
 ```bash
@@ -27,6 +31,15 @@ npx skills add junhooo111/kr-skill-release-check
 
 - "공개해도 돼? 점검해줘"
 - "올리기 전에 기밀 들어갔는지 봐줘"
+
+점검은 `scripts/scan.mjs`가 하며 값은 가려서 위치와 건수만 보여 줍니다. 직접 돌려 볼 수도 있습니다.
+
+```bash
+node scripts/scan.mjs <점검할 폴더> [--terms=사전파일] [--no-history]
+
+# 비밀 값이 든 파일을 값은 가린 채 보고 싶을 때
+node scripts/scan.mjs <점검할 폴더> --redact-view=SKILL.md
+```
 
 처음에는 공개하면 안 되는 단어(회사명, 고객사 등)가 있는지 묻습니다. 답하면 `~/.claude/kr-skill-release-check/private-terms.txt`에 저장할지 물어봅니다. 이 파일은 공개 레포에 올리지 마세요.
 
