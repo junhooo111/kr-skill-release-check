@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // kr-skill-release-check 점검 스크립트. 읽기 전용이며 값은 가려서 출력한다(위치와 건수 위주).
-// 사용: node scan.mjs <대상 폴더> [--terms=<사전 파일>] [--no-history] [--max-commits=500]
+// 사용: node scan.mjs <대상 폴더> [--terms=<사전 파일>] [--ignore=<경로 패턴>]... [--no-history] [--max-commits=500]
+//       node scan.mjs <대상 폴더> --redact-view=<상대 경로>   (값을 가려서 파일 보기)
+// --ignore와 대상 폴더의 .release-check-ignore(한 줄에 패턴 하나)로 점검에서 뺄 경로를 지정한다. *는 한 단계, **는 여러 단계.
+// PDF는 pdftotext(없으면 mutool)로 본문을 읽는다.
 // 종료 코드: 차단이 1건 이상이면 1, 아니면 0.
 import { readFileSync, readdirSync, statSync, existsSync, openSync, readSync, closeSync } from 'node:fs'
 import { join, relative, basename, extname, resolve, dirname, sep } from 'node:path'
@@ -19,6 +22,20 @@ if (!existsSync(target) || !statSync(target).isDirectory()) {
 }
 const doHistory = !flag('no-history')
 const maxCommits = Number(flagVal('max-commits') || 500)
+
+// ---------- 제외 패턴 ----------
+const ignoreFile = join(target, '.release-check-ignore')
+const ignorePatterns = [
+  ...argv.filter((a) => a.startsWith('--ignore=')).map((a) => a.slice('--ignore='.length)),
+  ...(existsSync(ignoreFile) ? readFileSync(ignoreFile, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#')) : []),
+]
+const ignoreRes = ignorePatterns.map((g) => {
+  const p = g.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '')
+  const esc = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*')
+  return { hasSlash: p.includes('/'), re: new RegExp('^' + esc + '(/.*)?$') }
+})
+const isIgnored = (rel) => ignoreRes.some(({ hasSlash, re }) => re.test(rel) || (!hasSlash && re.test(basename(rel))))
+let ignoredCount = 0
 
 // ---------- 규칙 불러오기 (Rust 문법 → JS 정규식) ----------
 const P = JSON.parse(readFileSync(join(HERE, '..', 'references', 'patterns.json'), 'utf8'))
@@ -68,23 +85,46 @@ if (redactView) {
 
 // ---------- 파일 순회 ----------
 const SKIP_DIRS = new Set(['.git', 'node_modules'])
-const BIN_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.woff', '.woff2', '.ttf', '.otf', '.zip', '.gz', '.mp3', '.mp4', '.exe', '.dll', '.jar', '.pptx', '.docx', '.xlsx'])
+const BIN_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.otf', '.zip', '.gz', '.mp3', '.mp4', '.exe', '.dll', '.jar', '.pptx', '.docx', '.xlsx'])
 const files = []
 const allNames = [] // 상대 경로(바이너리 포함)
 const skippedBinary = []
+const listNames = (dir) => { // 제외한 폴더 안의 파일 이름만 수집(비밀 파일 이름 검사용)
+  const out = []
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name)
+    if (statSync(p).isDirectory()) { if (!SKIP_DIRS.has(name)) out.push(...listNames(p)) } else out.push(relative(target, p).split(sep).join('/'))
+  }
+  return out
+}
 const walk = (dir) => {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name)
     const st = statSync(p)
-    if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) walk(p); continue }
-    allNames.push(relative(target, p).split(sep).join('/'))
+    const relP = relative(target, p).split(sep).join('/')
+    if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) { if (isIgnored(relP)) { ignoredCount++; allNames.push(...listNames(p)) } else walk(p) } continue }
+    allNames.push(relP)
+    if (isIgnored(relP) || relP === '.release-check-ignore') { ignoredCount++; continue }
     if (BIN_EXT.has(extname(name).toLowerCase())) { skippedBinary.push(relative(target, p)); continue }
     files.push(p)
   }
 }
 walk(target)
 
+let pdfRead = 0
+let pdfTool = ''
+const pdfUnreadable = []
+const pdfText = (p) => {
+  const tries = [['pdftotext', ['-layout', '-enc', 'UTF-8', p, '-']], ['mutool', ['draw', '-q', '-F', 'txt', '-o', '-', p]]]
+  for (const [cmd, args] of tries) {
+    const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    if (!r.error && r.status === 0 && typeof r.stdout === 'string') { pdfRead++; pdfTool = cmd; return r.stdout }
+  }
+  pdfUnreadable.push(relative(target, p).split(sep).join('/'))
+  return null
+}
 const readText = (p) => {
+  if (extname(p).toLowerCase() === '.pdf') return pdfText(p)
   const st = statSync(p)
   if (st.size > 2 * 1024 * 1024) return null
   const fd = openSync(p, 'r')
@@ -113,7 +153,7 @@ for (const f of files) {
   if (termsAbs && resolve(f) === termsAbs) continue
   const rel = relative(target, f).split(sep).join('/')
   const text = readText(f)
-  if (text === null) { skippedBig++; continue }
+  if (text === null) { if (extname(f).toLowerCase() !== '.pdf') skippedBig++; continue }
   const lines = text.split(/\r?\n/)
   lines.forEach((line, i) => {
     for (const r of rules) {
@@ -168,17 +208,20 @@ if (isRepo && doHistory) {
   const out = log.stdout || ''
   const commitCount = (out.match(/^@@COMMIT /gm) || []).length
   const hist = new Map() // kind|id|file -> {commits:Set}
-  let commit = '', file = ''
+  let commit = '', file = '', skipHist = false
   const blockRules = rules.filter((r) => r.severity === 'block')
   for (const line of out.split(/\r?\n/)) {
     if (line.startsWith('@@COMMIT ')) { commit = line.slice(9); continue }
     if (line.startsWith('diff --git ')) {
       file = line.replace(/^diff --git a\/.* b\//, '')
+      skipHist = isIgnored(file)
+      if (skipHist) continue
       const fl = file.toLowerCase()
       if (!(relTermsRepo && file === relTermsRepo)) terms.forEach((t, ti) => { if (fl.includes(t.toLowerCase())) bump('term', `t${ti}`, '사전 단어(이력의 파일 이름)', file, commit) })
       continue
     }
     if (!line.startsWith('+') || line.startsWith('+++')) continue
+    if (skipHist) continue
     if (relTermsRepo && file === relTermsRepo) continue // 사전 파일 자체는 위에서 따로 보고함
     const body = line.slice(1)
     for (const r of blockRules) { r.re.lastIndex = 0; if (r.re.test(body)) bump('rule', r.id, r.name, file, commit) }
@@ -238,7 +281,7 @@ const extraRow = (e) => { const i = e.detail.indexOf(' → '); return i < 0 ? `|
 
 console.log(`# scan 결과: ${basename(target)}`)
 console.log(`대상: ${target}`)
-console.log(`검사한 텍스트 파일 ${files.length - skippedBig}개 (숨김 파일 포함). 건너뜀: 바이너리 ${skippedBinary.length}개, 큰 파일·NUL 포함 ${skippedBig}개.`)
+console.log(`검사한 파일 ${files.length - skippedBig - pdfUnreadable.length}개 (숨김 파일 포함, PDF 본문 ${pdfRead}개${pdfRead ? ' ' + pdfTool + '로 읽음' : ''}). 건너뜀: 바이너리 ${skippedBinary.length}개, 큰 파일·NUL 포함 ${skippedBig}개, 읽지 못한 PDF ${pdfUnreadable.length}개, 제외 패턴으로 뺀 항목 ${ignoredCount}개.`)
 console.log(`사전: ${terms.length ? `${terms.length}단어 (${termsPath})` : '없음 (규칙 점검만)'}`)
 console.log(`건수 기준: 같은 원인(규칙 또는 사전 단어) × 같은 파일은 1건으로 센다.`)
 console.log(`\nSUMMARY block=${blockN} warn=${warnN}\n`)
@@ -266,6 +309,8 @@ console.log('\n## 구조')
 console.log('| 항목 | 결과 |\n|---|---|')
 structure.forEach(([a, b]) => console.log(`| ${a} | ${b} |`))
 console.log('\n## 확인하지 못한 것')
-console.log('- 이미지·PDF 등 바이너리 속 글자' + (skippedBinary.length ? ` (${skippedBinary.length}개 파일: ${skippedBinary.slice(0, 5).join(', ')}${skippedBinary.length > 5 ? ' 외' : ''})` : ''))
+if (ignorePatterns.length) console.log(`- 사용자가 제외한 경로(점검하지 않음): ${ignorePatterns.join(', ')}`)
+if (pdfUnreadable.length) console.log(`- 본문을 읽지 못한 PDF ${pdfUnreadable.length}개 (pdftotext 또는 mutool이 필요함): ${pdfUnreadable.slice(0, 5).join(', ')}${pdfUnreadable.length > 5 ? ' 외' : ''}`)
+console.log('- 이미지 등 바이너리 속 글자' + (skippedBinary.length ? ` (${skippedBinary.length}개 파일: ${skippedBinary.slice(0, 5).join(', ')}${skippedBinary.length > 5 ? ' 외' : ''})` : ''))
 console.log('- 규칙과 사전에 없는 기밀. 통과는 "안전하다"는 뜻이 아님')
 process.exit(blockN ? 1 : 0)

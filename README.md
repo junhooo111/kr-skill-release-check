@@ -15,7 +15,7 @@
 
 ## 요구 사항
 
-Node 18 이상(점검 스크립트 `scripts/scan.mjs`용), git(이력 점검용).
+Node 18 이상(점검 스크립트 `scripts/scan.mjs`용), git(이력 점검용). PDF 본문까지 보려면 `pdftotext`(poppler) 또는 `mutool`이 필요합니다. 없으면 PDF는 "읽지 못함"으로 보고됩니다.
 
 ## 설치
 
@@ -37,6 +37,9 @@ npx skills add junhooo111/kr-skill-release-check
 ```bash
 node scripts/scan.mjs <점검할 폴더> [--terms=사전파일] [--no-history]
 
+# 오탐이 뻔한 경로 제외 (여러 번 가능). 대상 폴더의 .release-check-ignore 파일에 한 줄씩 적어도 됩니다
+node scripts/scan.mjs <점검할 폴더> --ignore=scripts/rules.mjs --ignore=".claude/skills/**"
+
 # 비밀 값이 든 파일을 값은 가린 채 보고 싶을 때
 node scripts/scan.mjs <점검할 폴더> --redact-view=SKILL.md
 ```
@@ -46,7 +49,8 @@ node scripts/scan.mjs <점검할 폴더> --redact-view=SKILL.md
 ## 한계
 
 - 규칙과 내 사전에 없는 기밀은 찾지 못합니다.
-- 이미지와 PDF 속 글자는 읽지 못합니다. 직접 확인하세요.
+- 이미지 속 글자는 읽지 못합니다(PDF 본문은 pdftotext가 있을 때만 읽습니다). 직접 확인하세요.
+- 제외한 경로는 점검하지 않으므로, 오탐이 확실한 곳에만 쓰세요.
 - 통과해도 안전하다는 보증이 아닙니다.
 - 정규식은 오탐이 있을 수 있어서 `warn` 항목은 사람이 판단해야 합니다.
 
